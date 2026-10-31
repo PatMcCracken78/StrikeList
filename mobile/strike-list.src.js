@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Strike List Mobile
 // @namespace    https://github.com/PatMcCracken78/StrikeList
-// @version      1.1.0
+// @version      1.2.0
 // @description  Your Torn target list and war list in a slide-out panel: live status timers, FF / FF now / FR, one-tap attack, FF Scouter estimates, share codes with the Strike List desktop app. Works in Torn PDA and desktop browsers.
 // @author       _Storm_ [2678385]
 // @license      GPL-3.0-or-later
@@ -29,7 +29,7 @@
   if (window.__strikeListMobile) return;          // never run twice on one page
   window.__strikeListMobile = true;
 
-  const VERSION = "1.1.0";
+  const VERSION = "1.2.0";
   const PDA_KEY = "###PDA-APIKEY###";             // Torn PDA replaces this with your key
   const HEADER_IMG = "data:image/png;base64,__HEADER__";
   const ICON_IMG = "data:image/png;base64,__ICON__";
@@ -139,14 +139,18 @@
   let lastCall = 0;
   const queue = [];
   let pumping = false;
-  function torn(path, params = {}) {   // all Torn calls are queued >= 1.6 s apart (<= ~37/min)
-    return new Promise((resolve, reject) => { queue.push({ path, params, resolve, reject }); pump(); });
+  function torn(path, params = {}, urgent = false) {   // queued: normal calls >= 1.5 s apart (<= 40/min)
+    return new Promise((resolve, reject) => {
+      const job = { path, params, resolve, reject, urgent };
+      if (urgent) queue.unshift(job); else queue.push(job);
+      pump();
+    });
   }
   async function pump() {
     if (pumping) return; pumping = true;
     while (queue.length) {
       const job = queue.shift();
-      const wait = Math.max(0, lastCall + 1600 - Date.now());
+      const wait = Math.max(0, lastCall + (job.urgent ? 600 : 1500) - Date.now());
       if (wait) await new Promise((r) => setTimeout(r, wait));
       lastCall = Date.now();
       try {
@@ -214,8 +218,8 @@
     hist.since = Math.max(0, newest - 600);
     save("hist", hist);
   }
-  async function refreshTarget(id) {
-    const p = await torn(`user/${id}`, { selections: "profile" });
+  async function refreshTarget(id, urgent = false) {
+    const p = await torn(`user/${id}`, { selections: "profile", timestamp: now() }, urgent);
     const t = targets[id] || (targets[id] = { added: now(), color: 0, note: "" });
     Object.assign(t, {
       name: p.name, level: p.level, faction: (p.faction || {}).faction_name || "",
@@ -242,25 +246,61 @@
 
   let busy = false, lastRefresh = 0, lastError = "", lastInfo = "", setMsg = "";
   let pending = null, pendingText = "", shareErr = "", clearArmed = false;
-  async function refreshAll(force) {
-    if (busy || !apiKey()) { if (!apiKey()) lastError = "No API key - open ⚙ Settings"; render(); return; }
-    busy = true; lastError = ""; lastInfo = ""; render();
-    const ids = Object.keys(targets).map(Number);
-    try {
-      await syncAttacks().catch((e) => { lastError = e.message; });
-      // oldest first, so a long list refreshes fairly
-      ids.sort((a, b) => (targets[a].updated || 0) - (targets[b].updated || 0));
-      let n = 0;
-      for (const id of ids) {
-        if (!force && targets[id].updated && now() - targets[id].updated < 60) continue;
-        try { await refreshTarget(id); } catch (e) { targets[id].error = e.message; lastError = e.message; if (/error (2|10|13|18):/.test(e.message)) break; }
-        if (++n % 5 === 0) { saveTargets(); render(); }
-      }
-      saveTargets();
-      await refreshFFS(ids, false).catch((e) => { lastError = e.message; });
-    } finally { busy = false; lastRefresh = now(); render(); }
-  }
+  let looping = false, forceAfter = 0, lastHistSync = 0, checkedRecently = [];
 
+  // How stale each target may get before it's re-checked (seconds):
+  //   looks attackable / hospital ending within 2 min -> 20 s, hospital < 15 min -> 60 s, everything else -> 180 s
+  function wantAge(t) {
+    const s = t.status || {}, left = (s.until || 0) - now();
+    if (!s.state || (t.updated || 0) < forceAfter) return 0;
+    if (s.state === "Okay" || ((s.state === "Hospital" || s.state === "Jail") && left < 120)) return 20;
+    if ((s.state === "Hospital" || s.state === "Jail") && left < 900) return 60;
+    return 180;
+  }
+  function mostStale() {                 // the target most overdue for a re-check, or null if all are fresh enough
+    let best = null, bestScore = 0;
+    for (const id of Object.keys(targets)) {
+      const t = targets[id], score = now() - (t.updated || 0) - wantAge(t);
+      if (score > bestScore) { best = Number(id); bestScore = score; }
+    }
+    return best;
+  }
+  async function liveLoop() {            // runs while the Targets panel is open
+    if (looping) return; looping = true;
+    try {
+      while (open && cfg.view === "targets" && !document.hidden && apiKey()) {
+        if (now() - lastHistSync > 300) { lastHistSync = now(); await syncAttacks().catch((e) => { lastError = e.message; }); }
+        const id = mostStale();
+        if (id == null) { await new Promise((r) => setTimeout(r, 1000)); continue; }
+        try { await refreshTarget(id); targets[id].error = null; lastError = ""; }
+        catch (e) {
+          if (targets[id]) targets[id].error = e.message; lastError = e.message;
+          if (/error (2|10|13|18):/.test(e.message)) break;   // bad / paused key: stop
+          await new Promise((r) => setTimeout(r, 3000));
+        }
+        checkedRecently.push(now()); checkedRecently = checkedRecently.filter((x) => now() - x < 60);
+        lastRefresh = now(); saveTargets(); softRender();
+      }
+    } finally { looping = false; softRender(); }
+  }
+  // re-render without losing scroll position; skipped while a sheet (typing) is open
+  let renderQueued = false;
+  function softRender() {
+    if (renderQueued) return; renderQueued = true;
+    setTimeout(() => {
+      renderQueued = false; if (sheet) return;
+      const list = root.querySelector(".list"), top = list ? list.scrollTop : 0;
+      render();
+      const list2 = root.querySelector(".list"); if (list2) list2.scrollTop = top;
+    }, 400);
+  }
+  async function refreshAll(force) {     // ⟳ / after imports: re-check everyone soon, then keep going live
+    if (!apiKey()) { lastError = "No API key - open ⚙ Settings"; return render(); }
+    if (force) forceAfter = now();
+    lastError = ""; lastInfo = ""; render();
+    refreshFFS(Object.keys(targets).map(Number), false).then(softRender, (e) => { lastError = e.message; });
+    liveLoop();
+  }
   // ------------------------------------------------------------------ war (enemy faction roster + your picks)
   let war = load("war", { fid: 0, name: "", start: 0, end: 0, auto: false, updated: 0, detected: 0, members: {} });
   let picks = load("warpicks", { fid: 0, ids: {} });
@@ -298,11 +338,17 @@
     const members = {};
     for (const m of list) {
       const st = m.status || {}, la = m.last_action || {};
-      members[m.id] = { name: m.name, level: m.level, position: m.position || "", days: m.days_in_faction,
+      members[m.id] = { checked: now(), name: m.name, level: m.level, position: m.position || "", days: m.days_in_faction,
         status: { state: st.state, desc: st.description, until: st.until || 0 }, online: la.status || "", last_action: la.timestamp || 0 };
     }
     Object.assign(war, { fid, name: d.name || war.name || String(fid), members, updated: now() });
     saveWar();
+  }
+  async function refreshMember(id) {     // re-check one enemy right before attacking
+    const p = await torn(`user/${id}`, { selections: "profile", timestamp: now() }, true);
+    const m = war.members[id]; if (!m) return;
+    m.status = { state: (p.status || {}).state, desc: (p.status || {}).description, until: (p.status || {}).until || 0 };
+    m.checked = now(); saveWar();
   }
   async function myStats() {           // your total battle stats, for "× me" (cached 6 h)
     if (mybs.total && now() - mybs.ts < 6 * 3600) return;
@@ -343,17 +389,23 @@
   }
 
   // ------------------------------------------------------------------ derived values
-  function statusOf(t) {
+  // ts = when this data was fetched. Anything that says "attackable" but is older than 45 s is shown as unconfirmed.
+  const FRESH = 45;
+  function statusOf(t, ts) {
     const s = t.status || {}; const left = (s.until || 0) - now();
+    const age = now() - (ts || t.updated || 0);
     if (t.error && !s.state) return { text: "error", col: "#ff6b6b", ok: false };
-    if (!s.state) return { text: "not loaded yet", col: "#8a929c", ok: false };
+    if (!s.state) return { text: "checking…", col: "#8a929c", ok: false, stale: true };
     if (s.state === "Hospital" || s.state === "Jail") {
       if (left > 0) return { text: `${s.state[0]} for ${hms(left)}`, col: "#ff6b6b", ok: false, left };
-      return { text: `Out ${hms(-left)} ago*`, col: "#e8c547", ok: true };
+      return { text: `${s.state === "Jail" ? "Jail" : "Hospital"} timer ended · checking…`, col: "#e8c547", ok: true, stale: true };
     }
     if (s.state === "Traveling" || s.state === "Abroad") return { text: s.desc || s.state, col: "#6aa9ff", ok: false };
     if (s.state === "Federal") return { text: "Federal", col: "#ff6b6b", ok: false };
-    if (s.state === "Okay") return { text: "Okay", col: "#5fd38a", ok: true };
+    if (s.state === "Okay") {
+      if (age > FRESH) return { text: `Okay? · checked ${ago(ts || t.updated)}`, col: "#e8c547", ok: true, stale: true };
+      return { text: "Okay", col: "#5fd38a", ok: true };
+    }
     return { text: s.desc || s.state, col: "#8a929c", ok: false };
   }
   function row(id) {
@@ -365,12 +417,12 @@
   function wrow(id) {
     const m = war.members[id] || { name: `#${id}`, status: {} }, f = ffs[id] || {};
     const estFR = f.ff != null && m.level ? +(Math.min(f.ff, 3) * (1 + Math.log(m.level)) / 4).toFixed(2) : null;
-    return { id: Number(id), m, name: m.name || `#${id}`, level: m.level, pos: m.position, st: statusOf(m),
+    return { id: Number(id), m, name: m.name || `#${id}`, level: m.level, pos: m.position, st: statusOf(m, m.checked || war.updated),
              ffNow: f.ff, bs: f.bs, bsh: f.bsh, vs: f.bs && mybs.total ? f.bs / mybs.total : null, estFR,
              picked: !!picks.ids[id], gone: !war.members[id] };
   }
   // attackable first, then hospital/jail soonest-out first, then travelling, then unknown
-  const statusRank = (x) => (x.st.ok ? 0 : x.st.left ? 1e3 + x.st.left : /Travel|Abroad|In /.test(x.st.text) ? 1e9 : 2e9);
+  const statusRank = (x) => (x.st.ok ? (x.st.stale ? 500 : 0) : x.st.left ? 1e3 + x.st.left : /Travel|Abroad|In /.test(x.st.text) ? 1e9 : 2e9);
 
   // ------------------------------------------------------------------ UI
   const host = document.createElement("div");
@@ -411,6 +463,7 @@
     .m{color:#8a929c;font-size:12px}.b{color:#fff;font-weight:700}
     .atk{margin-left:auto;background:#7a2530;border:1px solid #ff6b6b;color:#fff;font-weight:800;border-radius:9px;padding:11px 13px;font-size:13px;text-decoration:none;white-space:nowrap}
     .atk.off{background:#24282d;border-color:#3a4047;color:#8a929c}
+    .atk.chk{background:#5a4a1a;border-color:#e8c547}
     .more{background:none;border:none;color:#8a929c;font-size:18px;padding:4px 6px}
     .foot{padding:8px 10px;border-top:1px solid #2f343a;display:flex;gap:6px;padding-bottom:max(8px,env(safe-area-inset-bottom))}
     .sheet{padding:10px;border-top:1px solid #2f343a;background:#1a1c20;display:none}.sheet.show{display:block}
@@ -438,7 +491,7 @@
     if (v) {
       sheet = null; render();
       if (cfg.view === "war") { if (!war.fid || now() - war.updated > 30) refreshWar({}); }
-      else if (now() - lastRefresh > 120) refreshAll(false);
+      else refreshAll(false);
     }
   }
 
@@ -507,8 +560,8 @@
         <button class="chip ${cfg.filter === "all" ? "on" : ""}" data-a="f-all">All ${all.length}</button>
         <button class="chip ${cfg.filter === "ok" ? "on" : ""}" data-a="f-ok">Attackable ${ready}</button>
         <button class="chip" data-a="sort">${SORT_NAMES[cfg.sort]} ▾</button>
-        <button class="chip" style="margin-left:auto" data-a="refresh">${busy ? "…" : "⟳"}</button></div>
-      <div class="msg ${lastError ? "err" : ""}">${esc(lastError || lastInfo || (lastRefresh ? "Updated " + ago(lastRefresh) : "Tap ⟳ to load your targets"))}</div>`;
+        <button class="chip" style="margin-left:auto" data-a="refresh">⟳</button></div>
+      <div class="msg ${lastError ? "err" : ""}">${esc(lastError || lastInfo || (looping ? `● Live — attackable targets re-checked every ~20 s (${checkedRecently.length}/min)` : lastRefresh ? "Updated " + ago(lastRefresh) : "Opening… checking your targets"))}</div>`;
   }
   function targetsList(all) {
     const list = rows();
@@ -527,7 +580,7 @@
           ${x.t.note ? `<div class="note">“${esc(x.t.note)}”</div>` : ""}
         </div>
         <button class="more" data-a="more" data-id="${x.id}">⋯</button>
-        ${x.st.ok ? `<a class="atk" href="${ATTACK_URL(x.id)}">Attack</a>` : `<a class="atk off" data-left="${x.id}" href="${ATTACK_URL(x.id)}">${x.st.left ? hms(x.st.left) : "Attack"}</a>`}
+        ${x.st.ok ? `<a class="atk ${x.st.stale ? "chk" : ""}" data-a="atk" data-id="${x.id}" href="${ATTACK_URL(x.id)}">Attack</a>` : `<a class="atk off" data-a="atk" data-id="${x.id}" data-left="${x.id}" href="${ATTACK_URL(x.id)}">${x.st.left ? hms(x.st.left) : "Attack"}</a>`}
       </div>`;
     }
     return html;
@@ -575,7 +628,7 @@
           <div class="m">${x.bsh ? `~${esc(x.bsh)}` : cfg.ffs ? "stats ?" : "stats: turn on FF Scouter in ⚙"}${x.vs != null ? ` · <span style="color:${vsCol}">${x.vs.toFixed(2)}× me</span>` : ""}${x.ffNow != null ? ` · FF ${fmtFF(x.ffNow)}` : ""}</div>
           <div style="font-size:12px"><span style="font-weight:700;color:${x.st.col}" data-wuntil="${x.id}">${esc(x.st.text)}</span>${x.estFR != null ? `<span class="m"> · est FR </span><span class="b">${x.estFR.toFixed(2)}</span>` : ""}</div>
         </div>
-        ${x.st.ok ? `<a class="atk" href="${ATTACK_URL(x.id)}">Attack</a>` : `<a class="atk off" data-wleft="${x.id}" href="${ATTACK_URL(x.id)}">${x.st.left ? hms(x.st.left) : "Attack"}</a>`}
+        ${x.st.ok ? `<a class="atk ${x.st.stale ? "chk" : ""}" data-a="watk" data-id="${x.id}" href="${ATTACK_URL(x.id)}">Attack</a>` : `<a class="atk off" data-a="watk" data-id="${x.id}" data-wleft="${x.id}" href="${ATTACK_URL(x.id)}">${x.st.left ? hms(x.st.left) : "Attack"}</a>`}
       </div>`;
     }
     return html;
@@ -648,9 +701,26 @@
     const el = e.target.closest("[data-a]"); if (!el) return;
     const a = el.dataset.a, $ = (s) => root.querySelector(s);
     if (a === "close") return setOpen(false);
+    if (a === "atk" || a === "watk") {
+      // Data older than 15 s? Check this one player right now (jumps the queue) before opening the attack page.
+      const id = Number(el.dataset.id), isWar = a === "watk";
+      const t = isWar ? war.members[id] : targets[id]; if (!t) return;
+      const age = now() - (isWar ? (t.checked || war.updated) : t.updated || 0);
+      if (age <= 15 && statusOf(t, isWar ? (t.checked || war.updated) : 0).ok) return;   // fresh: just go
+      e.preventDefault();
+      el.textContent = "Checking…";
+      try {
+        if (isWar) await refreshMember(id); else { await refreshTarget(id, true); saveTargets(); }
+        const st = isWar ? statusOf(war.members[id], war.members[id].checked) : statusOf(targets[id]);
+        if (st.ok && !st.stale) { location.href = ATTACK_URL(id); return; }
+        lastInfo = `${(isWar ? war.members[id] : targets[id]).name || id}: ${st.text} — not attackable right now`;
+      } catch (err) { location.href = ATTACK_URL(id); return; }   // can't check (API trouble): let Torn decide
+      return render();
+    }
     if (a === "v-targets" || a === "v-war") {
       cfg.view = a === "v-war" ? "war" : "targets"; saveCfg(); sheet = null; lastInfo = ""; render();
       if (cfg.view === "war" && (!war.fid || now() - war.updated > 30)) refreshWar({});
+      if (cfg.view === "targets") refreshAll(false);
       return;
     }
     if (a === "w-all" || a === "w-picks") { cfg.wFilter = a === "w-all" ? "all" : "picks"; saveCfg(); return render(); }
@@ -744,10 +814,13 @@
       el.textContent = st.text; el.style.color = st.col;
     });
     tick("data-until", (id) => targets[id]);
-    tick("data-wuntil", (id) => war.members[id]);
+    root.querySelectorAll("[data-wuntil]").forEach((el) => {
+      const m = war.members[el.dataset.wuntil]; if (!m) return; const st = statusOf(m, m.checked || war.updated);
+      el.textContent = st.text; el.style.color = st.col;
+    });
     root.querySelectorAll("[data-left],[data-wleft]").forEach((el) => {
       const id = el.dataset.left || el.dataset.wleft, t = el.dataset.left ? targets[id] : war.members[id];
-      if (!t) return; const st = statusOf(t);
+      if (!t) return; const st = el.dataset.left ? statusOf(t) : statusOf(t, t.checked || war.updated);
       if (st.ok) { el.textContent = "Attack"; el.classList.remove("off"); } else if (st.left) el.textContent = hms(st.left);
     });
     const ww = root.querySelector("[data-warwhen]");
@@ -756,7 +829,7 @@
     if (cfg.view === "war" && war.fid && !warBusy && now() - war.updated >= 30 && !document.hidden) refreshWar({});
   }, 1000);
   // background: keep statuses fresh while Torn is open (every 5 min, only when the page is visible)
-  setInterval(() => { if (!document.hidden && apiKey() && Object.keys(targets).length) refreshAll(false); }, 5 * 60 * 1000);
+  setInterval(() => { if (!open && !document.hidden && apiKey()) { lastHistSync = now(); syncAttacks().catch(() => {}); } }, 5 * 60 * 1000);
 
   // ---- "+ Strike List" button on player profiles
   function profileButton() {
