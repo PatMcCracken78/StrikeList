@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Strike List Mobile
 // @namespace    https://github.com/PatMcCracken78/StrikeList
-// @version      1.0.1
-// @description  Your Torn target list in a slide-out panel: live status timers, FF / FF now / FR, one-tap attack, FF Scouter estimates, share codes with the Strike List desktop app. Works in Torn PDA and desktop browsers.
+// @version      1.1.0
+// @description  Your Torn target list and war list in a slide-out panel: live status timers, FF / FF now / FR, one-tap attack, FF Scouter estimates, share codes with the Strike List desktop app. Works in Torn PDA and desktop browsers.
 // @author       _Storm_ [2678385]
 // @license      GPL-3.0-or-later
 // @match        https://www.torn.com/*
@@ -29,7 +29,7 @@
   if (window.__strikeListMobile) return;          // never run twice on one page
   window.__strikeListMobile = true;
 
-  const VERSION = "1.0.1";
+  const VERSION = "1.1.0";
   const PDA_KEY = "###PDA-APIKEY###";             // Torn PDA replaces this with your key
   const HEADER_IMG = "data:image/png;base64,__HEADER__";
   const ICON_IMG = "data:image/png;base64,__ICON__";
@@ -45,8 +45,11 @@
   const load = (k, d) => { try { const v = localStorage.getItem(K(k)); return v ? JSON.parse(v) : d; } catch (e) { return d; } };
   const save = (k, v) => { try { localStorage.setItem(K(k), JSON.stringify(v)); } catch (e) { /* storage full / blocked */ } };
 
-  const DEFAULTS = { key: "", ffs: false, minFF: 2.5, side: "right", top: 45, filter: "ok", sort: "fr", keepFlagged: true };
-  let cfg = Object.assign({}, DEFAULTS, load("cfg", {}));
+  const DEFAULTS = { key: "", ffs: false, minFF: 2.5, side: "right", top: 45, filter: "all", sort: "status", keepFlagged: true,
+                     view: "targets", wFilter: "all", wSort: "status", wOk: false, wWeaker: false, defaultsV: 2 };
+  const savedCfg = load("cfg", {});
+  let cfg = Object.assign({}, DEFAULTS, savedCfg);
+  if (savedCfg.defaultsV !== 2) { cfg.filter = "all"; cfg.sort = "status"; cfg.defaultsV = 2; save("cfg", cfg); }  // new default view
   let targets = load("targets", {});          // id -> {name, level, status, life, last_action, updated, color, note, added}
   let hist = load("hist", { since: 0, wins: {} }); // wins: defenderId -> {ff, fr, ended, name, level}
   let ffs = load("ffs", {});                  // id -> {ff, bs, bsh, fetched}
@@ -258,6 +261,87 @@
     } finally { busy = false; lastRefresh = now(); render(); }
   }
 
+  // ------------------------------------------------------------------ war (enemy faction roster + your picks)
+  let war = load("war", { fid: 0, name: "", start: 0, end: 0, auto: false, updated: 0, detected: 0, members: {} });
+  let picks = load("warpicks", { fid: 0, ids: {} });
+  let mybs = load("mybs", { total: 0, ts: 0 });
+  let warBusy = false, warError = "";
+  const saveWar = () => { save("war", war); save("warpicks", picks); };
+  const memberList = (raw) => Array.isArray(raw) ? raw.filter((m) => m && m.id)
+    : Object.entries(raw || {}).map(([id, m]) => ({ ...m, id: Number(id) }));
+
+  async function detectWar() {        // your faction's current/upcoming ranked war
+    war.detected = now();
+    const d = await torn("faction/", { selections: "basic" });
+    const mine = Number(d.ID || d.id || 0);
+    for (const w of Object.values(d.ranked_wars || {})) {
+      const info = w.war || {};
+      if (info.end && info.end < now()) continue;
+      const enemy = Object.entries(w.factions || {}).find(([fid]) => Number(fid) !== mine);
+      if (enemy) return { fid: Number(enemy[0]), name: enemy[1].name || "", start: info.start || 0, end: info.end || 0 };
+    }
+    try {                              // newer API shape as a fallback
+      const r = ((await torn("v2/faction/wars", {})).wars || {}).ranked;
+      if (r && !(r.end && r.end < now())) {
+        const enemy = (r.factions || []).find((f) => Number(f.id) !== mine);
+        if (enemy) return { fid: Number(enemy.id), name: enemy.name || "", start: r.start || 0, end: r.end || 0 };
+      }
+    } catch (e) { /* ignore */ }
+    return null;
+  }
+  async function loadEnemy(fid) {      // one call: the whole roster with status + last action
+    const d = await torn(`faction/${fid}`, { selections: "basic" });
+    const list = memberList(d.members);
+    if (!list.length) throw new Error(`Faction ${fid} not found or has no members`);
+    if (war.fid !== fid) war.members = {};
+    if (picks.fid !== fid) picks = { fid, ids: {} };
+    const members = {};
+    for (const m of list) {
+      const st = m.status || {}, la = m.last_action || {};
+      members[m.id] = { name: m.name, level: m.level, position: m.position || "", days: m.days_in_faction,
+        status: { state: st.state, desc: st.description, until: st.until || 0 }, online: la.status || "", last_action: la.timestamp || 0 };
+    }
+    Object.assign(war, { fid, name: d.name || war.name || String(fid), members, updated: now() });
+    saveWar();
+  }
+  async function myStats() {           // your total battle stats, for "× me" (cached 6 h)
+    if (mybs.total && now() - mybs.ts < 6 * 3600) return;
+    try {
+      const d = await torn("user/", { selections: "battlestats" });
+      mybs = { total: d.total || ["strength", "speed", "dexterity", "defense"].reduce((a, k) => a + (Number(d[k]) || 0), 0), ts: now() };
+      save("mybs", mybs);
+    } catch (e) { /* key without battlestats access: just no "× me" */ }
+  }
+  async function refreshWar(opts = {}) {
+    if (warBusy || !apiKey()) { if (!apiKey()) warError = "No API key - open ⚙ Settings"; render(); return; }
+    warBusy = true; warError = ""; render();
+    try {
+      let fid = opts.manualFid || 0;
+      if (fid) Object.assign(war, { auto: false, start: 0, end: 0 });
+      else if (opts.detect || !war.fid || (war.auto && now() - war.detected > 1800)) {
+        const w = await detectWar();
+        if (w) { Object.assign(war, { auto: true, start: w.start, end: w.end, name: w.name }); fid = w.fid; }
+        else if (opts.detect || !war.fid) warError = "No ranked war found for your faction - enter a faction ID below";
+      }
+      fid = fid || war.fid;
+      if (fid) {
+        await loadEnemy(fid);
+        await myStats();
+        await refreshFFS(Object.keys(war.members).map(Number), false).catch((e) => { warError = e.message; });
+      }
+    } catch (e) { warError = e.message; }
+    finally { warBusy = false; saveWar(); render(); }
+  }
+  function warText() {
+    const ids = Object.keys(picks.ids).map(Number);
+    const lines = [`War list vs ${war.name || "?"} (${ids.length} targets)`];
+    for (const r of ids.map(wrow).sort((a, b) => (b.estFR ?? 0) - (a.estFR ?? 0))) {
+      lines.push([`${r.name} [${r.id}]`, `lvl ${r.level ?? "?"}`, r.bsh && `~${r.bsh} stats`, r.ffNow != null && `FF ${fmtFF(r.ffNow)}`,
+                  picks.ids[r.id].note].filter(Boolean).join(" · ") + `  ${ATTACK_URL(r.id)}`);
+    }
+    return lines.join("\n");
+  }
+
   // ------------------------------------------------------------------ derived values
   function statusOf(t) {
     const s = t.status || {}; const left = (s.until || 0) - now();
@@ -278,6 +362,15 @@
              ffNow: f.ff, bsh: f.bsh, st: statusOf(t), lastWin: w.ended };
   }
   const effFF = (r) => (r.ffNow != null ? r.ffNow : r.ff);
+  function wrow(id) {
+    const m = war.members[id] || { name: `#${id}`, status: {} }, f = ffs[id] || {};
+    const estFR = f.ff != null && m.level ? +(Math.min(f.ff, 3) * (1 + Math.log(m.level)) / 4).toFixed(2) : null;
+    return { id: Number(id), m, name: m.name || `#${id}`, level: m.level, pos: m.position, st: statusOf(m),
+             ffNow: f.ff, bs: f.bs, bsh: f.bsh, vs: f.bs && mybs.total ? f.bs / mybs.total : null, estFR,
+             picked: !!picks.ids[id], gone: !war.members[id] };
+  }
+  // attackable first, then hospital/jail soonest-out first, then travelling, then unknown
+  const statusRank = (x) => (x.st.ok ? 0 : x.st.left ? 1e3 + x.st.left : /Travel|Abroad|In /.test(x.st.text) ? 1e9 : 2e9);
 
   // ------------------------------------------------------------------ UI
   const host = document.createElement("div");
@@ -304,6 +397,12 @@
     .x{margin-left:auto;font-size:22px;color:#8a929c;background:none;border:none;padding:4px 8px}
     .chip{background:#24282d;border:1px solid #3a4047;color:#d9dde2;border-radius:13px;padding:5px 11px;font-size:12px;font-weight:600}
     .chip.on{background:#22304a;border-color:#7aa7ff;color:#fff}
+    .chip[disabled]{opacity:.4}
+    .seg{display:flex;margin-top:8px;background:#1d2024;border:1px solid #2f343a;border-radius:10px;padding:3px}
+    .seg button{flex:1;background:none;border:none;color:#8a929c;font-weight:700;font-size:13px;padding:7px;border-radius:8px}
+    .seg button.on{background:#22304a;color:#fff}
+    .wbar{margin-top:8px;font-size:13px;color:#e6e9ed}
+    .star{background:none;border:none;font-size:22px;color:#8a929c;padding:0 2px;line-height:1}.star.on{color:#e8c547}
     .list{flex:1;overflow-y:auto;padding:8px;-webkit-overflow-scrolling:touch}
     .card{background:#1d2024;border:1px solid #2f343a;border-radius:10px;padding:8px 10px;margin-bottom:7px;display:flex;align-items:center;gap:10px}
     .card.off{opacity:.62}
@@ -336,7 +435,11 @@
   function setOpen(v) {
     open = v; wrap.classList.toggle("open", v);
     tab.style.display = v ? "none" : "";
-    if (v) { sheet = null; render(); if (now() - lastRefresh > 120) refreshAll(false); }
+    if (v) {
+      sheet = null; render();
+      if (cfg.view === "war") { if (!war.fid || now() - war.updated > 30) refreshWar({}); }
+      else if (now() - lastRefresh > 120) refreshAll(false);
+    }
   }
 
   // ---- draggable edge tab: slides up/down, snaps to the nearest side on release
@@ -377,26 +480,41 @@
     let r = Object.keys(targets).map(row);
     if (cfg.filter === "ok") r = r.filter((x) => x.st.ok);
     const key = { fr: (x) => -(x.fr ?? -1), ff: (x) => -(effFF(x) ?? -1), level: (x) => -(x.level || 0),
-                  status: (x) => (x.st.ok ? -1 : x.st.left || 1e9) }[cfg.sort];
-    return r.sort((a, b) => key(a) - key(b));
+                  status: statusRank }[cfg.sort];
+    return r.sort((a, b) => key(a) - key(b) || (b.fr ?? -1) - (a.fr ?? -1));
   }
   function render() {
     const all = Object.keys(targets).map(row);
     const ready = all.filter((x) => x.st.ok).length;
     badge.textContent = ready; badge.style.display = ready ? "" : "none";
     if (!open) return;
-    const list = rows();
-    const sorts = { fr: "FR", ff: "FF", level: "Lvl", status: "Status" };
+    const isWar = cfg.view === "war";
     let html = `<div class="ph"><div class="row"><img src="${HEADER_IMG}" style="height:34px"><button class="x" data-a="close">✕</button></div>
-      <div class="row" style="margin-top:8px">
-        <button class="chip ${cfg.filter === "ok" ? "on" : ""}" data-a="f-ok">Attackable ${ready}</button>
+      <div class="seg"><button class="${isWar ? "" : "on"}" data-a="v-targets">🎯 Targets</button><button class="${isWar ? "on" : ""}" data-a="v-war">⚔ War${war.fid ? " · " + Object.keys(picks.ids).length : ""}</button></div>`;
+    html += isWar ? warHeader() : targetsHeader(all, ready);
+    html += `</div><div class="list">${isWar ? warList() : targetsList(all)}</div>${sheetHtml()}`;
+    html += isWar
+      ? `<div class="foot"><button class="chip" data-a="w-find">Find war</button><button class="chip" data-a="faction">Faction…</button>
+         <button class="chip" data-a="w-copy">Copy list</button><button class="chip" style="margin-left:auto" data-a="settings">⚙</button></div>`
+      : `<div class="foot"><button class="chip" data-a="add">+ Add</button><button class="chip" data-a="clean">Clean up</button>
+         <button class="chip" data-a="share">⇄ Share</button><button class="chip" style="margin-left:auto" data-a="settings">⚙</button></div>`;
+    panel.innerHTML = html;
+  }
+
+  const SORT_NAMES = { status: "Hosp time", fr: "FR", ff: "FF", level: "Lvl" };
+  function targetsHeader(all, ready) {
+    return `<div class="row" style="margin-top:8px">
         <button class="chip ${cfg.filter === "all" ? "on" : ""}" data-a="f-all">All ${all.length}</button>
-        <button class="chip" data-a="sort">${sorts[cfg.sort]} ▾</button>
+        <button class="chip ${cfg.filter === "ok" ? "on" : ""}" data-a="f-ok">Attackable ${ready}</button>
+        <button class="chip" data-a="sort">${SORT_NAMES[cfg.sort]} ▾</button>
         <button class="chip" style="margin-left:auto" data-a="refresh">${busy ? "…" : "⟳"}</button></div>
-      <div class="msg ${lastError ? "err" : ""}">${esc(lastError || lastInfo || (lastRefresh ? "Updated " + ago(lastRefresh) : "Tap ⟳ to load your targets"))}</div></div>`;
-    html += `<div class="list">`;
-    if (!all.length) html += `<div class="empty">No targets yet.<br>Tap <b>+ Add</b>, use the <b>+ Strike List</b> button on a player's profile,<br>or paste a share code in <b>⇄ Share</b>.</div>`;
-    else if (!list.length) html += `<div class="empty">Nobody attackable right now.<br>Tap <b>All</b> to see everyone.</div>`;
+      <div class="msg ${lastError ? "err" : ""}">${esc(lastError || lastInfo || (lastRefresh ? "Updated " + ago(lastRefresh) : "Tap ⟳ to load your targets"))}</div>`;
+  }
+  function targetsList(all) {
+    const list = rows();
+    if (!all.length) return `<div class="empty">No targets yet.<br>Tap <b>+ Add</b>, use the <b>+ Strike List</b> button on a player's profile,<br>or paste a share code in <b>⇄ Share</b>.</div>`;
+    if (!list.length) return `<div class="empty">Nobody attackable right now.<br>Tap <b>All</b> to see everyone.</div>`;
+    let html = "";
     for (const x of list) {
       const flag = FLAG_COLORS[x.t.color || 0];
       const lowNow = x.ffNow != null && x.ffNow < cfg.minFF;
@@ -409,16 +527,70 @@
           ${x.t.note ? `<div class="note">“${esc(x.t.note)}”</div>` : ""}
         </div>
         <button class="more" data-a="more" data-id="${x.id}">⋯</button>
-        ${x.st.ok ? `<a class="atk" href="${ATTACK_URL(x.id)}">Attack</a>` : `<a class="atk off" href="${ATTACK_URL(x.id)}">${x.st.left ? hms(x.st.left) : "Attack"}</a>`}
+        ${x.st.ok ? `<a class="atk" href="${ATTACK_URL(x.id)}">Attack</a>` : `<a class="atk off" data-left="${x.id}" href="${ATTACK_URL(x.id)}">${x.st.left ? hms(x.st.left) : "Attack"}</a>`}
       </div>`;
     }
-    html += `</div>${sheetHtml()}<div class="foot"><button class="chip" data-a="add">+ Add</button><button class="chip" data-a="clean">Clean up</button>
-      <button class="chip" data-a="share">⇄ Share</button><button class="chip" style="margin-left:auto" data-a="settings">⚙</button></div>`;
-    panel.innerHTML = html;
+    return html;
   }
+
+  const WSORT_NAMES = { status: "Hosp time", estfr: "Est FR", ff: "FF", stats: "Stats ↑" };
+  function warRows() {
+    let ids = Object.keys(war.members);
+    if (cfg.wFilter === "picks") ids = Object.keys(picks.ids);
+    let r = ids.map(wrow);
+    if (cfg.wOk) r = r.filter((x) => x.st.ok);
+    if (cfg.wWeaker) r = r.filter((x) => x.vs != null && x.vs <= 1);
+    const key = { status: statusRank, estfr: (x) => -(x.estFR ?? -1), ff: (x) => -(x.ffNow ?? -1), stats: (x) => x.bs ?? 1e15 }[cfg.wSort];
+    return r.sort((a, b) => key(a) - key(b) || (b.estFR ?? -1) - (a.estFR ?? -1));
+  }
+  function warHeader() {
+    if (!war.fid) return `<div class="msg ${warError ? "err" : ""}">${esc(warError || (warBusy ? "Looking for your ranked war…" : ""))}</div>`;
+    let when = "scouting";
+    if (war.auto && war.start > now()) when = `starts in ${dhms(war.start - now())}`;
+    else if (war.auto && war.start && !war.end) when = `<b style="color:#ff6b6b">in progress</b>`;
+    else if (war.auto && war.end) when = "ended";
+    const nPicks = Object.keys(picks.ids).length, nAll = Object.keys(war.members).length;
+    return `<div class="wbar">⚔ vs <b>${esc(war.name)}</b> <span class="m">[${war.fid}]</span> — <span data-warwhen>${when}</span></div>
+      <div class="row" style="margin-top:6px;flex-wrap:wrap">
+        <button class="chip ${cfg.wFilter === "all" ? "on" : ""}" data-a="w-all">All ${nAll}</button>
+        <button class="chip ${cfg.wFilter === "picks" ? "on" : ""}" data-a="w-picks">★ My list ${nPicks}</button>
+        <button class="chip ${cfg.wOk ? "on" : ""}" data-a="w-ok">Attackable</button>
+        <button class="chip ${cfg.wWeaker ? "on" : ""}" data-a="w-weak" ${mybs.total ? "" : "disabled"}>≤ me</button>
+        <button class="chip" data-a="w-sort">${WSORT_NAMES[cfg.wSort]} ▾</button>
+        <button class="chip" style="margin-left:auto" data-a="w-refresh">${warBusy ? "…" : "⟳"}</button></div>
+      <div class="msg ${warError ? "err" : ""}">${esc(warError || lastInfo || "Updated " + ago(war.updated) + " · refreshes every 30 s while open")}</div>`;
+  }
+  function warList() {
+    if (!war.fid) return `<div class="empty">No enemy faction loaded.<br><br>
+        <button class="btn" data-a="w-find">Find our ranked war</button><br><br>or tap <b>Faction…</b> to scout any faction by ID or link.</div>`;
+    const list = warRows();
+    if (!list.length) return `<div class="empty">${cfg.wFilter === "picks" ? "Your war list is empty.<br>Tap <b>All</b>, then ☆ on the players you want." : "Nobody matches these filters."}</div>`;
+    let html = "";
+    for (const x of list) {
+      const vsCol = x.vs == null ? "" : x.vs < 0.75 ? "#5fd38a" : x.vs < 1.25 ? "#e8c547" : "#ff6b6b";
+      html += `<div class="card ${x.st.ok ? "" : "off"}">
+        <button class="star ${x.picked ? "on" : ""}" data-a="w-pick" data-id="${x.id}">${x.picked ? "★" : "☆"}</button>
+        <div style="min-width:0;flex:1">
+          <div><a class="nm" href="${PROFILE_URL(x.id)}">${esc(x.name)}</a> <span class="m">· ${x.level ?? "?"}${x.pos ? " · " + esc(x.pos) : ""}</span></div>
+          <div class="m">${x.bsh ? `~${esc(x.bsh)}` : cfg.ffs ? "stats ?" : "stats: turn on FF Scouter in ⚙"}${x.vs != null ? ` · <span style="color:${vsCol}">${x.vs.toFixed(2)}× me</span>` : ""}${x.ffNow != null ? ` · FF ${fmtFF(x.ffNow)}` : ""}</div>
+          <div style="font-size:12px"><span style="font-weight:700;color:${x.st.col}" data-wuntil="${x.id}">${esc(x.st.text)}</span>${x.estFR != null ? `<span class="m"> · est FR </span><span class="b">${x.estFR.toFixed(2)}</span>` : ""}</div>
+        </div>
+        ${x.st.ok ? `<a class="atk" href="${ATTACK_URL(x.id)}">Attack</a>` : `<a class="atk off" data-wleft="${x.id}" href="${ATTACK_URL(x.id)}">${x.st.left ? hms(x.st.left) : "Attack"}</a>`}
+      </div>`;
+    }
+    return html;
+  }
+  const dhms = (sec) => { const d = Math.floor(sec / 86400); return (d ? d + "d " : "") + hms(sec % 86400); };
 
   function sheetHtml() {
     if (!sheet) return "";
+    if (sheet === "faction") return `<div class="sheet show"><h4>Scout a faction</h4>
+      <input id="facId" placeholder="Faction ID or link (factions.php?…ID=12345)"><div class="row" style="margin-top:8px">
+      <button class="btn" data-a="do-faction">Load</button><button class="btn grey" data-a="close-sheet">Cancel</button></div>
+      <div class="msg">Switching faction starts a new war list.</div></div>`;
+    if (sheet === "wcopy") return `<div class="sheet show"><h4>War list</h4><div class="m">Select all and copy, then paste into Discord or faction chat.</div>
+      <textarea readonly style="min-height:120px">${esc(warText())}</textarea>
+      <div class="row" style="margin-top:6px"><button class="btn grey" data-a="close-sheet">Close</button></div></div>`;
     if (sheet === "add") return `<div class="sheet show"><h4>Add targets</h4>
       <input id="addIds" placeholder="Player IDs or profile links"><div class="row" style="margin-top:8px">
       <button class="btn" data-a="do-add">Add</button><button class="btn grey" data-a="close-sheet">Cancel</button></div></div>`;
@@ -471,11 +643,39 @@
   }
 
   // ---- actions
-  const SORT_ORDER = ["fr", "ff", "level", "status"];
+  const SORT_ORDER = ["status", "fr", "ff", "level"];
   panel.addEventListener("click", async (e) => {
     const el = e.target.closest("[data-a]"); if (!el) return;
     const a = el.dataset.a, $ = (s) => root.querySelector(s);
     if (a === "close") return setOpen(false);
+    if (a === "v-targets" || a === "v-war") {
+      cfg.view = a === "v-war" ? "war" : "targets"; saveCfg(); sheet = null; lastInfo = ""; render();
+      if (cfg.view === "war" && (!war.fid || now() - war.updated > 30)) refreshWar({});
+      return;
+    }
+    if (a === "w-all" || a === "w-picks") { cfg.wFilter = a === "w-all" ? "all" : "picks"; saveCfg(); return render(); }
+    if (a === "w-ok") { cfg.wOk = !cfg.wOk; saveCfg(); return render(); }
+    if (a === "w-weak") { cfg.wWeaker = !cfg.wWeaker; saveCfg(); return render(); }
+    if (a === "w-sort") { const o = ["status", "estfr", "ff", "stats"]; cfg.wSort = o[(o.indexOf(cfg.wSort) + 1) % o.length]; saveCfg(); return render(); }
+    if (a === "w-refresh") return refreshWar({});
+    if (a === "w-find") { sheet = null; return refreshWar({ detect: true }); }
+    if (a === "w-pick") {
+      const id = Number(el.dataset.id);
+      if (picks.ids[id]) delete picks.ids[id]; else picks.ids[id] = { added: now() };
+      picks.fid = war.fid; saveWar(); return render();
+    }
+    if (a === "faction") { sheet = sheet === "faction" ? null : "faction"; return render(); }
+    if (a === "do-faction") {
+      const ids = strictIds($("#facId").value);
+      if (!ids.length) { lastInfo = ""; warError = "Enter a faction ID or paste the faction page link"; sheet = null; return render(); }
+      sheet = null; return refreshWar({ manualFid: ids[ids.length - 1] });
+    }
+    if (a === "w-copy") {
+      if (!Object.keys(picks.ids).length) { warError = "Your war list is empty - star (☆) some players first"; return render(); }
+      try { await navigator.clipboard.writeText(warText()); warError = ""; lastInfo = "War list copied - paste it in Discord or faction chat"; render(); }
+      catch (err) { sheet = "wcopy"; render(); }
+      return;
+    }
     if (a === "f-ok" || a === "f-all") { cfg.filter = a === "f-ok" ? "ok" : "all"; saveCfg(); return render(); }
     if (a === "sort") { cfg.sort = SORT_ORDER[(SORT_ORDER.indexOf(cfg.sort) + 1) % SORT_ORDER.length]; saveCfg(); return render(); }
     if (a === "refresh") return refreshAll(true);
@@ -539,10 +739,21 @@
   // ---- live countdowns (every second, only the status lines)
   setInterval(() => {
     if (!open) { if (now() % 10 === 0) render(); return; }
-    root.querySelectorAll("[data-until]").forEach((el) => {
-      const t = targets[el.dataset.until]; if (!t) return; const s = statusOf(t);
-      el.textContent = s.text; el.style.color = s.col;
+    const tick = (attr, get) => root.querySelectorAll(`[${attr}]`).forEach((el) => {
+      const t = get(el.getAttribute(attr)); if (!t) return; const st = statusOf(t);
+      el.textContent = st.text; el.style.color = st.col;
     });
+    tick("data-until", (id) => targets[id]);
+    tick("data-wuntil", (id) => war.members[id]);
+    root.querySelectorAll("[data-left],[data-wleft]").forEach((el) => {
+      const id = el.dataset.left || el.dataset.wleft, t = el.dataset.left ? targets[id] : war.members[id];
+      if (!t) return; const st = statusOf(t);
+      if (st.ok) { el.textContent = "Attack"; el.classList.remove("off"); } else if (st.left) el.textContent = hms(st.left);
+    });
+    const ww = root.querySelector("[data-warwhen]");
+    if (ww && war.auto && war.start > now()) ww.textContent = `starts in ${dhms(war.start - now())}`;
+    // war view: refresh the enemy roster every 30 s while you're looking at it (1 call)
+    if (cfg.view === "war" && war.fid && !warBusy && now() - war.updated >= 30 && !document.hidden) refreshWar({});
   }, 1000);
   // background: keep statuses fresh while Torn is open (every 5 min, only when the page is visible)
   setInterval(() => { if (!document.hidden && apiKey() && Object.keys(targets).length) refreshAll(false); }, 5 * 60 * 1000);
@@ -578,5 +789,5 @@
   placeTab();
   render();
   profileButton();
-  window.__strikeListMobileAPI = { exportCode, importCode, readImport, targets: () => targets }; // handy for debugging
+  window.__strikeListMobileAPI = { exportCode, importCode, readImport, targets: () => targets, war: () => war, picks: () => picks }; // handy for debugging
 })();

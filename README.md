@@ -22,7 +22,11 @@ Your API key and data stay on your computer. Built because YATA keeps going down
 
 <p align="center"><img src="docs/mobile.png" alt="Strike List Mobile" width="100%"></p>
 
-A small Strike List tab sits on the edge of every Torn page — drag it up or down, or over to the other side, and it snaps into place. Tap it for your **Targets**: live hospital/travel countdowns, FF / **FF now** / **FR**, a big **Attack** button, flags, notes, Min FF clean-up and optional FF Scouter estimates. Player profiles get a **+ Strike List** button. The green badge shows how many targets you can hit right now.
+A small Strike List tab sits on the edge of every Torn page — drag it up or down, or over to the other side, and it snaps into place. Tap it for your **Targets** — everyone on your list, attackable first and then by who leaves hospital soonest — with live countdowns, FF / **FF now** / **FR**, a big **Attack** button, flags, notes, Min FF clean-up and optional FF Scouter estimates. Player profiles get a **+ Strike List** button. The green badge shows how many targets you can hit right now.
+
+**⚔ War view:** tap **War** at the top of the panel. It finds your faction's ranked war (or scout any faction by ID/link) and lists every enemy with estimated stats, **× me**, FF and estimated FR, sorted by who's out of hospital soonest. Star (☆) players to build your war list, filter **Attackable** or **≤ me**, and **Copy list** for Discord. The roster refreshes every 30 seconds while you're watching (one API call for the whole faction).
+
+<p align="center"><img src="docs/mobile-war.png" alt="Targets and War views" width="70%"></p>
 
 **Install:** [`strike-list.user.js`](https://raw.githubusercontent.com/PatMcCracken78/StrikeList/main/mobile/strike-list.user.js)
 - **Torn PDA:** open the user scripts manager in Settings, add a new script and paste the link above (or the script's contents). PDA supplies your API key automatically.
