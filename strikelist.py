@@ -28,7 +28,7 @@ from pathlib import Path
 ASSETS = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "assets"  # works when packaged
 
 APP_NAME = "Strike List"
-VERSION = "1.13"
+VERSION = "1.13.1"
 
 GREEN, YELLOW, RED, BLUE, MUTED = "#5fd38a", "#e8c547", "#ff6b6b", "#6aa9ff", "#8a929c"
 FLAG_COLORS = [None, GREEN, YELLOW, RED]
@@ -1153,10 +1153,14 @@ class MainWindow(QMainWindow):
 
         def do_import():
             try:
-                added, updated = core.import_code(inp.toPlainText())
-            except Exception:
-                msg.setText(f"<span style='color:{RED}'>That code didn't work — copy all of it, starting with SL1:</span>")
+                rows = core.read_import(inp.toPlainText())
+            except ValueError as e:
+                msg.setText(f"<span style='color:{RED}'>{e}</span>")
                 return
+            preview = ", ".join(str(r[0]) for r in rows[:8]) + ("…" if len(rows) > 8 else "")
+            if QMessageBox.question(self, "Import targets", f"Add {len(rows)} target(s) to your list?\n\n{preview}") != QMessageBox.Yes:
+                return
+            added, updated = core.import_rows(rows)
             msg.setText(f"<span style='color:{GREEN}'>Imported: {added} new, {updated} already on your list</span>")
             out.setPlainText(core.export_code())
             self.load_targets()

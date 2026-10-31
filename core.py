@@ -934,16 +934,41 @@ def export_code():
     return "SL1:" + _b64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
-def import_code(text):
-    """Accepts a share code (from desktop or mobile) or plain IDs / profile links. Returns (added, updated)."""
-    text = str(text or "").strip()
-    m = re.search(r"SL1:([A-Za-z0-9_-]+)", text)
-    if m:
-        s = m.group(1)
-        data = json.loads(_b64.urlsafe_b64decode(s + "=" * (-len(s) % 4)).decode())
-        rows = [r if isinstance(r, list) else [r] for r in data.get("t", [])]
-    else:
-        rows = [[i] for i in parse_ids(text)]
+def _find_code(text):
+    """Finds a share code even if a phone/app added spaces or line breaks, changed the case or dropped 'SL1:'."""
+    flat = re.sub(r"\s+", "", str(text or ""))
+    m = re.search(r"SL1[:：]?([A-Za-z0-9_\-+/]{8,}=*)", flat, re.I) or re.search(r"(eyJ[A-Za-z0-9_\-+/]{8,}=*)", flat)
+    return m.group(1).replace("+", "-").replace("/", "_").rstrip("=") if m else None
+
+
+def _strict_ids(text):
+    """IDs only from clear patterns (profile/attack links, [1234], digit-only tokens) - never from inside other text."""
+    text = str(text or "")
+    ids = {int(x) for x in re.findall(r"(?:XID|user2ID|ID)=(\d{1,8})", text, re.I)}
+    ids |= {int(x) for x in re.findall(r"\[(\d{1,8})\]", text)}
+    ids |= {int(t) for t in re.split(r"[\s,;]+", text) if re.fullmatch(r"\d{3,8}", t)}  # bare numbers: 3+ digits
+    return sorted(i for i in ids if i > 0)
+
+
+def read_import(text):
+    """Returns rows [[id, color, note], ...] without changing anything. Raises ValueError if nothing usable."""
+    code = _find_code(text)
+    if code:
+        try:
+            data = json.loads(_b64.urlsafe_b64decode(code + "=" * (-len(code) % 4)).decode())
+        except Exception:
+            raise ValueError("That share code is incomplete - copy all of it, starting with SL1:") from None
+        if not isinstance(data, dict) or not isinstance(data.get("t"), list):
+            raise ValueError("That isn't a Strike List code")
+        rows = [r if isinstance(r, list) else [r] for r in data["t"]]
+        return [r for r in rows if str(r[0]).isdigit() and int(r[0]) > 0]
+    ids = _strict_ids(text)
+    if not ids:
+        raise ValueError("No share code or player IDs found")
+    return [[i] for i in ids]
+
+
+def import_rows(rows):
     added = updated = 0
     now = int(time.time())
     with _db_lock, db() as con:
@@ -962,3 +987,8 @@ def import_code(text):
                     con.execute("UPDATE targets SET note=? WHERE id=?", (note, tid))
                 updated += 1
     return added, updated
+
+
+def import_code(text):
+    """Accepts a share code (from desktop or mobile) or plain IDs / profile links. Returns (added, updated)."""
+    return import_rows(read_import(text))

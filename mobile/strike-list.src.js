@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Strike List Mobile
 // @namespace    https://github.com/PatMcCracken78/StrikeList
-// @version      1.0.0
+// @version      1.0.1
 // @description  Your Torn target list in a slide-out panel: live status timers, FF / FF now / FR, one-tap attack, FF Scouter estimates, share codes with the Strike List desktop app. Works in Torn PDA and desktop browsers.
 // @author       _Storm_ [2678385]
 // @license      GPL-3.0-or-later
@@ -29,7 +29,7 @@
   if (window.__strikeListMobile) return;          // never run twice on one page
   window.__strikeListMobile = true;
 
-  const VERSION = "1.0.0";
+  const VERSION = "1.0.1";
   const PDA_KEY = "###PDA-APIKEY###";             // Torn PDA replaces this with your key
   const HEADER_IMG = "data:image/png;base64,__HEADER__";
   const ICON_IMG = "data:image/png;base64,__ICON__";
@@ -93,19 +93,36 @@
     });
     return "SL1:" + b64urlEncode(JSON.stringify({ v: 1, t }));
   }
-  function importCode(text) {
-    text = String(text || "").trim();
-    let rows = [];
-    const m = text.match(/SL1:([A-Za-z0-9_-]+)/);
-    if (m) {
-      const data = JSON.parse(b64urlDecode(m[1]));
-      rows = (data.t || []).map((r) => (Array.isArray(r) ? r : [r]));
-    } else {
-      rows = parseIds(text).map((id) => [id]);  // plain IDs / profile links also work
+  // Finds a share code even if a phone/app added spaces, line breaks, changed "SL1:" to "sl1:" or dropped it.
+  function findCode(text) {
+    const flat = String(text || "").replace(/\s+/g, "");
+    const m = flat.match(/SL1[:：]?([A-Za-z0-9_\-+/]{8,}=*)/i) || flat.match(/(eyJ[A-Za-z0-9_\-+/]{8,}=*)/);
+    return m ? m[1].replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "") : null;
+  }
+  // Plain IDs only from clear patterns: profile/attack links, [1234567], or tokens that are only digits.
+  // (Never pull digits out of the middle of other text - that's what grabbed Chedburn & co.)
+  function strictIds(text) {
+    const ids = new Set();
+    for (const m of String(text).matchAll(/(?:XID|user2ID|ID)=(\d{1,8})/gi)) ids.add(Number(m[1]));
+    for (const m of String(text).matchAll(/\[(\d{1,8})\]/g)) ids.add(Number(m[1]));
+    for (const tok of String(text).split(/[\s,;]+/)) if (/^\d{3,8}$/.test(tok)) ids.add(Number(tok)); // bare numbers: 3+ digits
+    return [...ids].filter((id) => id > 0);
+  }
+  function readImport(text) {
+    const code = findCode(text);
+    if (code) {
+      let data;
+      try { data = JSON.parse(b64urlDecode(code)); } catch (e) { throw new Error("That share code is incomplete - copy all of it, starting with SL1:"); }
+      if (!data || !Array.isArray(data.t)) throw new Error("That isn't a Strike List code");
+      return data.t.map((r) => (Array.isArray(r) ? r : [r])).filter((r) => Number(r[0]) > 0);
     }
+    const ids = strictIds(text);
+    if (!ids.length) throw new Error("No share code or player IDs found");
+    return ids.map((id) => [id]);
+  }
+  function importRows(rows) {
     let added = 0, updated = 0;
     for (const [id, color, note] of rows) {
-      if (!id) continue;
       const cur = targets[id];
       if (!cur) { targets[id] = { added: now(), color: color || 0, note: note || "" }; added++; }
       else { if (color) cur.color = color; if (note && !cur.note) cur.note = note; updated++; }
@@ -113,6 +130,7 @@
     saveTargets();
     return { added, updated };
   }
+  function importCode(text) { return importRows(readImport(text)); }
 
   // ------------------------------------------------------------------ networking
   let lastCall = 0;
@@ -220,6 +238,7 @@
   }
 
   let busy = false, lastRefresh = 0, lastError = "", lastInfo = "", setMsg = "";
+  let pending = null, pendingText = "", shareErr = "", clearArmed = false;
   async function refreshAll(force) {
     if (busy || !apiKey()) { if (!apiKey()) lastError = "No API key - open ⚙ Settings"; render(); return; }
     busy = true; lastError = ""; lastInfo = ""; render();
@@ -376,7 +395,7 @@
         <button class="chip" style="margin-left:auto" data-a="refresh">${busy ? "…" : "⟳"}</button></div>
       <div class="msg ${lastError ? "err" : ""}">${esc(lastError || lastInfo || (lastRefresh ? "Updated " + ago(lastRefresh) : "Tap ⟳ to load your targets"))}</div></div>`;
     html += `<div class="list">`;
-    if (!all.length) html += `<div class="empty">No targets yet.<br>Tap <b>+ Add</b>, use the <b>+ Strike List</b> button on a player's profile,<br>or import a share code in ⚙.</div>`;
+    if (!all.length) html += `<div class="empty">No targets yet.<br>Tap <b>+ Add</b>, use the <b>+ Strike List</b> button on a player's profile,<br>or paste a share code in <b>⇄ Share</b>.</div>`;
     else if (!list.length) html += `<div class="empty">Nobody attackable right now.<br>Tap <b>All</b> to see everyone.</div>`;
     for (const x of list) {
       const flag = FLAG_COLORS[x.t.color || 0];
@@ -423,13 +442,17 @@
       ${c.length ? `<button class="btn" style="background:#7a2530;border-color:#ff6b6b" data-a="clean-go">Remove ${c.length}</button>` : ""}
       <button class="btn grey" data-a="close-sheet">Close</button></div></div>`;
     }
-    if (sheet === "share") return `<div class="sheet show"><h4>Share your list (any phone ⇄ any computer)</h4>
+    if (sheet === "share") return `<div class="sheet show" style="max-height:70vh;overflow:auto"><h4>Share your list (any phone ⇄ any computer)</h4>
       <div class="m">Copy this code and paste it into Strike List on another device — desktop app (Targets → Share) or this script.</div>
       <textarea id="codeOut" readonly>${esc(exportCode())}</textarea>
       <div class="row" style="margin-top:6px"><button class="btn" data-a="copy">Copy code</button></div>
-      <h4>Import</h4><textarea id="codeIn" placeholder="Paste a Strike List code (or player IDs)"></textarea>
-      <div class="row" style="margin-top:6px"><button class="btn" data-a="import">Import</button><button class="btn grey" data-a="close-sheet">Close</button></div>
-      <div class="msg" id="shareMsg"></div></div>`;
+      <h4>Import</h4><textarea id="codeIn" placeholder="Paste a Strike List code (SL1:…) or player IDs / profile links">${esc(pendingText)}</textarea>
+      ${pending ? `<div class="msg" style="color:#e6e9ed">Found <b>${pending.length}</b> target${pending.length === 1 ? "" : "s"}${pending.length ? ": " + pending.slice(0, 6).map((r) => esc(r[2] ? `${r[0]} “${r[2]}”` : r[0])).join(", ") + (pending.length > 6 ? "…" : "") : ""}</div>
+        <div class="row" style="margin-top:6px"><button class="btn" data-a="import-go">Add ${pending.length} to my list</button><button class="btn grey" data-a="import-cancel">Cancel</button></div>`
+      : `<div class="row" style="margin-top:6px"><button class="btn" data-a="import">Check code</button><button class="btn grey" data-a="close-sheet">Close</button></div>`}
+      <div class="msg ${shareErr ? "err" : ""}" id="shareMsg">${esc(shareErr)}</div>
+      <h4>Start over</h4><div class="m">Removes every target from this device's list.</div>
+      <div class="row" style="margin-top:6px"><button class="btn grey" style="color:#ff6b6b" data-a="clear">${clearArmed ? `Tap again to remove all ${Object.keys(targets).length}` : "Clear list"}</button></div></div>`;
     if (sheet === "settings") return `<div class="sheet show" style="max-height:60vh;overflow:auto"><h4>Settings</h4>
       ${pdaKeyValid ? `<div class="m">API key: provided by Torn PDA ✓</div>` :
         `<div class="m">Torn API key (Limited Access)</div><input id="keyBox" type="password" value="${esc(cfg.key)}" placeholder="16-character key">`}
@@ -456,7 +479,7 @@
     if (a === "f-ok" || a === "f-all") { cfg.filter = a === "f-ok" ? "ok" : "all"; saveCfg(); return render(); }
     if (a === "sort") { cfg.sort = SORT_ORDER[(SORT_ORDER.indexOf(cfg.sort) + 1) % SORT_ORDER.length]; saveCfg(); return render(); }
     if (a === "refresh") return refreshAll(true);
-    if (["add", "clean", "share", "settings"].includes(a)) { sheet = sheet === a ? null : a; setMsg = ""; return render(); }
+    if (["add", "clean", "share", "settings"].includes(a)) { sheet = sheet === a ? null : a; setMsg = ""; pending = null; pendingText = ""; shareErr = ""; clearArmed = false; return render(); }
     if (a === "more") { sheet = "more"; sheetArg = Number(el.dataset.id); return render(); }
     if (a === "close-sheet") { sheet = null; return render(); }
     if (a === "do-add") {
@@ -479,10 +502,20 @@
       catch (err) { document.execCommand && document.execCommand("copy"); $("#shareMsg").textContent = "Code selected — long-press to copy if needed."; }
       return;
     }
-    if (a === "import") {
-      try { const r = importCode($("#codeIn").value); lastError = ""; lastInfo = `Imported: ${r.added} new, ${r.updated} already on your list`; sheet = null; render(); refreshAll(false); }
-      catch (err) { $("#shareMsg").textContent = "That code didn't work — copy the whole thing, starting with SL1:"; }
+    if (a === "import") {           // step 1: read the code and show what it contains
+      pendingText = $("#codeIn").value; shareErr = "";
+      try { pending = readImport(pendingText); } catch (err) { pending = null; shareErr = err.message; }
+      return render();
+    }
+    if (a === "import-cancel") { pending = null; pendingText = ""; shareErr = ""; return render(); }
+    if (a === "import-go") {        // step 2: add them
+      const r = importRows(pending); pending = null; pendingText = ""; shareErr = "";
+      lastError = ""; lastInfo = `Imported: ${r.added} new, ${r.updated} already on your list`; sheet = null; render(); refreshAll(false);
       return;
+    }
+    if (a === "clear") {
+      if (!clearArmed) { clearArmed = true; setTimeout(() => { clearArmed = false; render(); }, 4000); return render(); }
+      clearArmed = false; targets = {}; saveTargets(); lastInfo = "List cleared"; sheet = null; return render();
     }
     if (a === "reset-tab") { cfg.side = "right"; cfg.top = 45; saveCfg(); placeTab(); return; }
     if (a === "save-settings") {
@@ -545,5 +578,5 @@
   placeTab();
   render();
   profileButton();
-  window.__strikeListMobileAPI = { exportCode, importCode, targets: () => targets }; // handy for debugging
+  window.__strikeListMobileAPI = { exportCode, importCode, readImport, targets: () => targets }; // handy for debugging
 })();
