@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Strike List Mobile
 // @namespace    https://github.com/PatMcCracken78/StrikeList
-// @version      1.2.0
+// @version      1.3.0
 // @description  Your Torn target list and war list in a slide-out panel: live status timers, FF / FF now / FR, one-tap attack, FF Scouter estimates, share codes with the Strike List desktop app. Works in Torn PDA and desktop browsers.
 // @author       _Storm_ [2678385]
 // @license      GPL-3.0-or-later
@@ -29,7 +29,7 @@
   if (window.__strikeListMobile) return;          // never run twice on one page
   window.__strikeListMobile = true;
 
-  const VERSION = "1.2.0";
+  const VERSION = "1.3.0";
   const PDA_KEY = "###PDA-APIKEY###";             // Torn PDA replaces this with your key
   const HEADER_IMG = "data:image/png;base64,__HEADER__";
   const ICON_IMG = "data:image/png;base64,__ICON__";
@@ -139,9 +139,12 @@
   let lastCall = 0;
   const queue = [];
   let pumping = false;
-  function torn(path, params = {}, urgent = false) {   // queued: normal calls >= 1.5 s apart (<= 40/min)
+  // queued. Spacing: urgent (Attack check) jumps the queue · fast (catching up) 0.35 s · normal 1.5 s.
+  // If Torn says "too many requests" (your other tools share the same 100/min), everything slows to 2.5 s for a minute.
+  let slowUntil = 0, callTimes = [];
+  function torn(path, params = {}, urgent = false, fast = false) {
     return new Promise((resolve, reject) => {
-      const job = { path, params, resolve, reject, urgent };
+      const job = { path, params, resolve, reject, urgent, fast };
       if (urgent) queue.unshift(job); else queue.push(job);
       pump();
     });
@@ -150,16 +153,24 @@
     if (pumping) return; pumping = true;
     while (queue.length) {
       const job = queue.shift();
-      const wait = Math.max(0, lastCall + (job.urgent ? 600 : 1500) - Date.now());
+      // Torn counts calls per minute (100/min shared by all your tools), so catch-up may burst as long as
+      // Strike List stays under 50 calls in any 60 s.
+      callTimes = callTimes.filter((x) => Date.now() - x < 60000);
+      const roomy = callTimes.length < 50;
+      const gap = Date.now() < slowUntil ? 2500 : job.urgent ? (roomy ? 250 : 600) : job.fast && roomy ? 350 : 1500;
+      const wait = Math.max(0, lastCall + gap - Date.now());
       if (wait) await new Promise((r) => setTimeout(r, wait));
-      lastCall = Date.now();
+      lastCall = Date.now(); callTimes.push(lastCall);
       try {
         const key = apiKey();
         if (!key) throw new Error("No API key - open ⚙ Settings");
         const q = new URLSearchParams({ ...job.params, key, comment: "StrikeListMobile" });
         const res = await fetch(`${API}/${job.path}?${q}`);
         const data = await res.json();
-        if (data.error) throw new Error(`Torn API error ${data.error.code}: ${data.error.error}`);
+        if (data.error) {
+          if (data.error.code === 5) slowUntil = Date.now() + 60000;
+          throw new Error(`Torn API error ${data.error.code}: ${data.error.error}`);
+        }
         job.resolve(data);
       } catch (e) { job.reject(e); }
     }
@@ -218,8 +229,8 @@
     hist.since = Math.max(0, newest - 600);
     save("hist", hist);
   }
-  async function refreshTarget(id, urgent = false) {
-    const p = await torn(`user/${id}`, { selections: "profile", timestamp: now() }, urgent);
+  async function refreshTarget(id, urgent = false, fast = false) {
+    const p = await torn(`user/${id}`, { selections: "profile", timestamp: now() }, urgent, fast);
     const t = targets[id] || (targets[id] = { added: now(), color: 0, note: "" });
     Object.assign(t, {
       name: p.name, level: p.level, faction: (p.faction || {}).faction_name || "",
@@ -257,31 +268,52 @@
     if ((s.state === "Hospital" || s.state === "Jail") && left < 900) return 60;
     return 180;
   }
-  function mostStale() {                 // the target most overdue for a re-check, or null if all are fresh enough
+  const overdue = (t) => now() - (t.updated || 0) - wantAge(t);
+  function mostStale(onlyHot) {          // the target most overdue for a re-check, or null if all are fresh enough
     let best = null, bestScore = 0;
     for (const id of Object.keys(targets)) {
-      const t = targets[id], score = now() - (t.updated || 0) - wantAge(t);
+      const t = targets[id]; if (onlyHot && wantAge(t) > 20) continue;
+      const score = overdue(t);
       if (score > bestScore) { best = Number(id); bestScore = score; }
     }
     return best;
   }
-  async function liveLoop() {            // runs while the Targets panel is open
+  // Catching up = several targets are well out of date (app was closed / just opened). Check them fast, in the
+  // order they appear on screen, so the top of the list settles first and confirmed hits rise to the top.
+  function catchUpList() {
+    return rows(true).filter((x) => overdue(x.t) > 30).map((x) => x.id);
+  }
+  let catchTotal = 0, catchDone = 0;
+  async function liveLoop() {
+    // Panel open on Targets: live (~20 s for anything attackable). Panel closed but Torn on screen: quietly keep the
+    // likely-attackable ones warm (one check every ~6 s), so opening the panel is instant.
     if (looping) return; looping = true;
     try {
-      while (open && cfg.view === "targets" && !document.hidden && apiKey()) {
-        if (now() - lastHistSync > 300) { lastHistSync = now(); await syncAttacks().catch((e) => { lastError = e.message; }); }
-        const id = mostStale();
+      while (!document.hidden && apiKey()) {
+        const live = open && cfg.view === "targets";
+        if (live && now() - lastHistSync > 300) { lastHistSync = now(); await syncAttacks().catch((e) => { lastError = e.message; }); }
+        const behind = catchUpList();
+        let id = null, fast = false;
+        if (behind.length >= 3) {
+          if (!catchTotal) { catchTotal = behind.length; catchDone = 0; }
+          id = behind[0]; fast = true;
+        } else {
+          catchTotal = 0;
+          id = live ? mostStale(false) : mostStale(true);
+        }
         if (id == null) { await new Promise((r) => setTimeout(r, 1000)); continue; }
-        try { await refreshTarget(id); targets[id].error = null; lastError = ""; }
+        try { await refreshTarget(id, false, fast); targets[id].error = null; lastError = ""; }
         catch (e) {
-          if (targets[id]) targets[id].error = e.message; lastError = e.message;
+          if (targets[id]) { targets[id].error = e.message; targets[id].updated = now(); } lastError = e.message;
           if (/error (2|10|13|18):/.test(e.message)) break;   // bad / paused key: stop
           await new Promise((r) => setTimeout(r, 3000));
         }
+        if (catchTotal) catchDone++;
         checkedRecently.push(now()); checkedRecently = checkedRecently.filter((x) => now() - x < 60);
         lastRefresh = now(); saveTargets(); softRender();
+        if (!fast && !live) await new Promise((r) => setTimeout(r, 4500));   // background pace: ~10 checks/min
       }
-    } finally { looping = false; softRender(); }
+    } finally { looping = false; catchTotal = 0; softRender(); }
   }
   // re-render without losing scroll position; skipped while a sheet (typing) is open
   let renderQueued = false;
@@ -529,16 +561,16 @@
   tab.addEventListener("pointercancel", () => { drag = null; tab.classList.remove("drag"); placeTab(); });
 
   // ---- panel rendering
-  function rows() {
+  function rows(all) {
     let r = Object.keys(targets).map(row);
-    if (cfg.filter === "ok") r = r.filter((x) => x.st.ok);
+    if (cfg.filter === "ok" && !all) r = r.filter((x) => x.st.ok);
     const key = { fr: (x) => -(x.fr ?? -1), ff: (x) => -(effFF(x) ?? -1), level: (x) => -(x.level || 0),
                   status: statusRank }[cfg.sort];
     return r.sort((a, b) => key(a) - key(b) || (b.fr ?? -1) - (a.fr ?? -1));
   }
   function render() {
     const all = Object.keys(targets).map(row);
-    const ready = all.filter((x) => x.st.ok).length;
+    const ready = all.filter((x) => x.st.ok && !x.st.stale).length;
     badge.textContent = ready; badge.style.display = ready ? "" : "none";
     if (!open) return;
     const isWar = cfg.view === "war";
@@ -561,7 +593,7 @@
         <button class="chip ${cfg.filter === "ok" ? "on" : ""}" data-a="f-ok">Attackable ${ready}</button>
         <button class="chip" data-a="sort">${SORT_NAMES[cfg.sort]} ▾</button>
         <button class="chip" style="margin-left:auto" data-a="refresh">⟳</button></div>
-      <div class="msg ${lastError ? "err" : ""}">${esc(lastError || lastInfo || (looping ? `● Live — attackable targets re-checked every ~20 s (${checkedRecently.length}/min)` : lastRefresh ? "Updated " + ago(lastRefresh) : "Opening… checking your targets"))}</div>`;
+      <div class="msg ${lastError ? "err" : ""}">${esc(lastError || lastInfo || (looping && catchTotal ? `⏳ Catching up — ${Math.min(catchDone, catchTotal)} of ${catchTotal} checked (top of the list first)` : looping ? `● Live — attackable targets re-checked every ~20 s (${checkedRecently.length}/min)` : lastRefresh ? "Updated " + ago(lastRefresh) : "Opening… checking your targets"))}</div>`;
   }
   function targetsList(all) {
     const list = rows();
@@ -710,7 +742,8 @@
       e.preventDefault();
       el.textContent = "Checking…";
       try {
-        if (isWar) await refreshMember(id); else { await refreshTarget(id, true); saveTargets(); }
+        const check = async () => { if (isWar) await refreshMember(id); else { await refreshTarget(id, true); saveTargets(); } };
+        try { await check(); } catch (err) { if (!/error 5:/.test(err.message)) throw err; await new Promise((r) => setTimeout(r, 2000)); await check(); }
         const st = isWar ? statusOf(war.members[id], war.members[id].checked) : statusOf(targets[id]);
         if (st.ok && !st.stale) { location.href = ATTACK_URL(id); return; }
         lastInfo = `${(isWar ? war.members[id] : targets[id]).name || id}: ${st.text} — not attackable right now`;
@@ -859,8 +892,10 @@
   window.addEventListener("hashchange", profileButton);
 
   // ------------------------------------------------------------------ start
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) liveLoop(); });
   placeTab();
   render();
+  setTimeout(liveLoop, 1500);
   profileButton();
   window.__strikeListMobileAPI = { exportCode, importCode, readImport, targets: () => targets, war: () => war, picks: () => picks }; // handy for debugging
 })();
