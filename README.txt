@@ -29,6 +29,8 @@ Using it
   red; "Clean up..." lists them so you can untick any to keep, then removes the rest.
   Uses FF Scouter's current FF ("FF now") when it's on, otherwise the FF of your last win.
   Flagged targets are kept unless you untick "Keep flagged targets".
+- Share... (Targets tab): copy your list to Strike List on any other phone or computer with a
+  share code, or paste one in. Works between Mac, Windows and Strike List Mobile.
 - Chains: your hits per chain - length, your share, respect, avg FR/FF, best hit.
   Uses your faction's chain list when your key can see it, otherwise groups your own hits.
 - Awards: every honor and medal with your progress, goal and an estimated time to get it.
@@ -43,6 +45,12 @@ Using it
 - Estimated stats come from FF Scouter (ffscouter.com). It's off by default - turn it on
   in Settings. That sends your Torn API key to FF Scouter, a separate service with its
   own Data Policy and Terms.
+
+Strike List Mobile (phones: Torn PDA, or any browser with Tampermonkey)
+- Install: https://raw.githubusercontent.com/PatMcCracken78/StrikeList/main/mobile/strike-list.user.js
+- In Torn PDA: open the user scripts manager (in Settings), add a new script and paste the
+  link above (or the script's contents).
+- A small Strike List tab appears on the side of Torn - drag it up/down or to the other side.
 
 Building the apps yourself
 - Mac:     bash build/build_mac.sh        -> build/release/StrikeList-<version>-mac.dmg

@@ -913,3 +913,52 @@ def fetch_chain():
         "cooldown_until": now + int(c.get("cooldown") or 0),
         "modifier": c.get("modifier"), "fetched": now,
     }
+
+
+# ----------------------------------------------------------------- share codes (same format as Strike List Mobile)
+# "SL1:" + base64url(JSON {"v":1, "t":[[id, color, note], ...]})  - works across any phone / computer
+import base64 as _b64
+
+
+def export_code():
+    rows = []
+    with db() as con:
+        for r in con.execute("SELECT id, color, note FROM targets ORDER BY id"):
+            row = [r["id"]]
+            if r["color"] or r["note"]:
+                row.append(r["color"] or 0)
+            if r["note"]:
+                row.append(r["note"])
+            rows.append(row)
+    raw = json.dumps({"v": 1, "t": rows}, separators=(",", ":"), ensure_ascii=False).encode()
+    return "SL1:" + _b64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def import_code(text):
+    """Accepts a share code (from desktop or mobile) or plain IDs / profile links. Returns (added, updated)."""
+    text = str(text or "").strip()
+    m = re.search(r"SL1:([A-Za-z0-9_-]+)", text)
+    if m:
+        s = m.group(1)
+        data = json.loads(_b64.urlsafe_b64decode(s + "=" * (-len(s) % 4)).decode())
+        rows = [r if isinstance(r, list) else [r] for r in data.get("t", [])]
+    else:
+        rows = [[i] for i in parse_ids(text)]
+    added = updated = 0
+    now = int(time.time())
+    with _db_lock, db() as con:
+        for r in rows:
+            tid = int(r[0])
+            color = int(r[1]) % 4 if len(r) > 1 and r[1] else 0
+            note = str(r[2])[:500] if len(r) > 2 and r[2] else ""
+            cur = con.execute("SELECT color, note FROM targets WHERE id=?", (tid,)).fetchone()
+            if not cur:
+                con.execute("INSERT INTO targets(id, added, color, note) VALUES(?,?,?,?)", (tid, now, color, note))
+                added += 1
+            else:
+                if color:
+                    con.execute("UPDATE targets SET color=? WHERE id=?", (color, tid))
+                if note and not cur["note"]:
+                    con.execute("UPDATE targets SET note=? WHERE id=?", (note, tid))
+                updated += 1
+    return added, updated

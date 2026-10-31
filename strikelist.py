@@ -18,7 +18,7 @@ from PySide6.QtCore import (QAbstractTableModel, QModelIndex, QObject, QRect, QR
 from PySide6.QtGui import QAction, QBrush, QColor, QFont, QIcon, QPalette, QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QFormLayout,
                                QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-                               QDialog, QDialogButtonBox, QDoubleSpinBox, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QSpinBox,
+                               QDialog, QDialogButtonBox, QDoubleSpinBox, QListWidget, QListWidgetItem, QPlainTextEdit, QMainWindow, QMenu, QMessageBox, QPushButton, QSpinBox,
                                QButtonGroup, QProgressBar, QScrollArea, QStackedWidget, QStyle, QStyledItemDelegate, QSystemTrayIcon, QTableView, QTabWidget,
                                QVBoxLayout, QWidget)
 
@@ -28,7 +28,7 @@ from pathlib import Path
 ASSETS = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / "assets"  # works when packaged
 
 APP_NAME = "Strike List"
-VERSION = "1.12.1"
+VERSION = "1.13"
 
 GREEN, YELLOW, RED, BLUE, MUTED = "#5fd38a", "#e8c547", "#ff6b6b", "#6aa9ff", "#8a929c"
 FLAG_COLORS = [None, GREEN, YELLOW, RED]
@@ -965,8 +965,10 @@ class MainWindow(QMainWindow):
         self.min_ff_box.valueChanged.connect(self._min_ff_changed)
         TargetModel.min_ff = self.min_ff_box.value()
         cleanup_btn = QPushButton("Clean up…", clicked=self.cleanup_targets)
+        share_btn = QPushButton("⇄  Share…", clicked=self.share_targets)
+        share_btn.setToolTip("Copy your list to Strike List on another phone or computer, or import one")
         cleanup_btn.setToolTip("Review and remove targets whose FF dropped below your minimum")
-        for x in (self.only_ok, self.flag_filter, self.text_filter, self.min_ff_box, cleanup_btn, self.refresh_btn):
+        for x in (self.only_ok, self.flag_filter, self.text_filter, self.min_ff_box, cleanup_btn, share_btn, self.refresh_btn):
             bar.addWidget(x)
         lay.addLayout(bar)
 
@@ -1117,6 +1119,52 @@ class MainWindow(QMainWindow):
             self.load_targets()
             self.load_attacks()
             self.statusBar().showMessage(f"Removed {len(ids)} target(s) below FF {min_ff:.2f}", 6000)
+
+    def share_targets(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Share your target list")
+        dlg.resize(560, 460)
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel("<b>Export</b> — copy this code and paste it into Strike List on any other phone or "
+                             "computer (Strike List Mobile in Torn PDA / your browser, or this app on Mac or Windows).",
+                             wordWrap=True))
+        out = QPlainTextEdit(core.export_code(), readOnly=True)
+        out.setFixedHeight(90)
+        lay.addWidget(out)
+        copy_btn = QPushButton("Copy code")
+        copy_btn.clicked.connect(lambda: (QApplication.clipboard().setText(out.toPlainText()),
+                                          copy_btn.setText("Copied ✓")))
+        lay.addWidget(copy_btn, 0, Qt.AlignLeft)
+        lay.addSpacing(10)
+        lay.addWidget(QLabel("<b>Import</b> — paste a Strike List code (or player IDs / profile links). "
+                             "Targets are added to your list; nothing is removed.", wordWrap=True))
+        inp = QPlainTextEdit()
+        inp.setPlaceholderText("SL1:…")
+        inp.setFixedHeight(90)
+        lay.addWidget(inp)
+        msg = QLabel(objectName="muted")
+        row = QHBoxLayout()
+        imp_btn = QPushButton("Import", objectName="primary")
+        close_btn = QPushButton("Close", clicked=dlg.accept)
+        row.addWidget(imp_btn)
+        row.addWidget(msg, 1)
+        row.addWidget(close_btn)
+        lay.addLayout(row)
+
+        def do_import():
+            try:
+                added, updated = core.import_code(inp.toPlainText())
+            except Exception:
+                msg.setText(f"<span style='color:{RED}'>That code didn't work — copy all of it, starting with SL1:</span>")
+                return
+            msg.setText(f"<span style='color:{GREEN}'>Imported: {added} new, {updated} already on your list</span>")
+            out.setPlainText(core.export_code())
+            self.load_targets()
+            if added:
+                self.refresh_all()
+
+        imp_btn.clicked.connect(do_import)
+        dlg.exec()
 
     def add_targets(self):
         ids = core.parse_ids(self.add_edit.text())

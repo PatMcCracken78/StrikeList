@@ -15,7 +15,20 @@ Your API key and data stay on your computer. Built because YATA keeps going down
 | 🏅 **Awards** | Every honor and medal with your progress, goal and estimated time to get it (YATA's awards engine). |
 | 🔭 **War Scout** | Finds your ranked-war opponent (or any faction ID/link) and lists every member with **estimated stats**, "vs me", FF, estimated respect, your record on them and live status. Filter and build a list. |
 | 📋 **War List** | Your pre-war hit list with live timers, 30-second auto-refresh (1 API call for the whole faction), flags, notes, and **Copy list** for Discord. |
+| ⇄ **Share** | Copy your target list to any other phone or computer (Strike List Mobile or desktop) with a share code. |
 | ⏱️ **Header** | Energy, drug & booster cooldowns, **live chain timer with alerts**, armory Medical/Drugs shortcuts, and your own status & life. |
+
+## 📱 Strike List Mobile (Torn PDA & browsers)
+
+<p align="center"><img src="docs/mobile.png" alt="Strike List Mobile" width="100%"></p>
+
+A small Strike List tab sits on the edge of every Torn page — drag it up or down, or over to the other side, and it snaps into place. Tap it for your **Targets**: live hospital/travel countdowns, FF / **FF now** / **FR**, a big **Attack** button, flags, notes, Min FF clean-up and optional FF Scouter estimates. Player profiles get a **+ Strike List** button. The green badge shows how many targets you can hit right now.
+
+**Install:** [`strike-list.user.js`](https://raw.githubusercontent.com/PatMcCracken78/StrikeList/main/mobile/strike-list.user.js)
+- **Torn PDA:** open the user scripts manager in Settings, add a new script and paste the link above (or the script's contents). PDA supplies your API key automatically.
+- **Desktop browsers:** install [Tampermonkey](https://www.tampermonkey.net/), then open the link above. Paste your Limited key in the panel's ⚙.
+
+**Move your list between devices:** tap **⇄ Share** (mobile) or **Share…** on the Targets tab (desktop) to copy a code, then paste it on the other device. It works between any phone and any computer, in either direction.
 
 ## Download
 
