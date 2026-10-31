@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Build output
+build/.venv/
+build/work/
+build/dist/
+build/release/
+
+# Never commit personal data (normally kept in your user data folder, not here)
+config.json
+strike.db
+*.db
+
+.DS_Store
+Thumbs.db

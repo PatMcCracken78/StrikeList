@@ -1,0 +1,9 @@
+STRIKE LIST - opening it the first time on Windows
+
+1. Put StrikeList-...-windows.exe somewhere permanent (e.g. Documents) and double-click it.
+2. If Windows SmartScreen says "Windows protected your PC": click "More info", then "Run anyway".
+   (Only needed once. Strike List is free and isn't signed with a paid certificate.)
+3. The first start takes a few seconds while it unpacks.
+4. In Strike List go to Settings, paste your Torn API key (Limited Access) and click Save.
+
+Your key and data stay on your computer. See LICENSE.txt - Strike List is free software (GPL v3).

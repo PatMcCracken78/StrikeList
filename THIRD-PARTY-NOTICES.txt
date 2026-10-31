@@ -1,0 +1,21 @@
+Strike List includes or uses the following third-party software:
+
+- YATA awards engine (folder yata_awards/) - Copyright 2019 Kivou [2000607]
+  https://github.com/Kivou-2000607/yata - GNU GPL v3 (yata_awards/LICENSE-GPL3.md)
+  Changed for Strike List: Django imports swapped for local equivalents; two stray
+  lines in the "commitment" category commented out.
+
+- Qt for Python (PySide6) - The Qt Company - GNU LGPL v3
+  https://www.qt.io/qt-for-python  (bundled in the packaged app, unmodified)
+
+- requests - Kenneth Reitz and contributors - Apache License 2.0
+  https://github.com/psf/requests
+
+- NumPy - NumPy Developers - BSD 3-Clause License
+  https://numpy.org
+
+Optional online services (not bundled):
+- Torn API - https://www.torn.com/api.html
+- FF Scouter - https://ffscouter.com/ (only if you turn it on in Settings)
+
+Strike List is not affiliated with or endorsed by Torn.

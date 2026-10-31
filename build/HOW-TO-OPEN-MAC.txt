@@ -1,0 +1,10 @@
+STRIKE LIST - opening it the first time on a Mac
+
+1. Drag "Strike List" onto the Applications shortcut.
+2. Open Applications, RIGHT-click (or Control-click) Strike List and choose Open.
+3. macOS says it's from an unidentified developer - click Open.
+   (Only needed once. Strike List is free and isn't signed with a paid Apple account.)
+   If there's no Open button: System Settings > Privacy & Security > scroll down > "Open Anyway".
+4. In Strike List go to Settings, paste your Torn API key (Limited Access) and click Save.
+
+Your key and data stay on your computer. See LICENSE.txt - Strike List is free software (GPL v3).
