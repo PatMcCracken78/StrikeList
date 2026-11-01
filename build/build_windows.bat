@@ -5,6 +5,12 @@ rem Output: build\release\StrikeList-<version>-windows.exe  (+ source zip)
 setlocal
 cd /d "%~dp0\.."
 set "ROOT=%CD%"
+if not exist strikelist.py (
+  echo This file has to stay in the "build" folder of the full Strike List download.
+  echo Get it from https://github.com/PatMcCracken78/StrikeList : Code - Download ZIP, unzip,
+  echo then double-click build\build_windows.bat inside the unzipped folder.
+  goto fail
+)
 for /f tokens^=2^ delims^=^" %%v in ('findstr /b "VERSION" strikelist.py') do set "VER=%%v"
 echo Building Strike List %VER% for Windows...
 
